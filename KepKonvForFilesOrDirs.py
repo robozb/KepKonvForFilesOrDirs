@@ -33,12 +33,12 @@ def get_prefix_suffix(file_dir, global_prefix, global_suffix):
 
     return prefix, suffix
 
-def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod):
+def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod,message):
     # Create parent directory for dest_file if it does not exist
     dest_dir = os.path.dirname(dest_file)
     os.makedirs(dest_dir, exist_ok=True)
     
-    print(f"Feldolgozás: {src_file} -> {dest_file}")
+    print(f"Feldolgozás: {message} {src_file} -> {dest_file}")
 
     if mod == "n":
         subprocess.run([
@@ -53,15 +53,20 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod):
         ])
 
 def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum):
-    for file in os.listdir(directory):
-        if file.lower().endswith('.jpg'):
-            filepath = os.path.join(directory, file)
-            file_dir = os.path.dirname(filepath)
-            output_dir = os.path.join(file_dir, "opt-webp-or-jpg")
-            prefix, suffix = get_prefix_suffix(file_dir, global_prefix, global_suffix)
-            filename = os.path.splitext(os.path.basename(filepath))[0]
-            output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
-            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod)
+    files = [f for f in os.listdir(directory) if f.lower().endswith('.jpg')]
+    total_files = len(files)
+    current_file = 0
+    
+    for file in files:
+        filepath = os.path.join(directory, file)
+        file_dir = os.path.dirname(filepath)
+        output_dir = os.path.join(file_dir, "opt-webp-or-jpg")
+        prefix, suffix = get_prefix_suffix(file_dir, global_prefix, global_suffix)
+        filename = os.path.splitext(os.path.basename(filepath))[0]
+        output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
+        
+        current_file += 1
+        convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod,f"{current_file}/{total_files}")
 
 def main():
     # Echo arguments
@@ -122,7 +127,7 @@ def main():
             prefix, suffix = get_prefix_suffix(file_dir, global_prefix, global_suffix)
             filename = os.path.splitext(os.path.basename(filepath))[0]
             output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
-            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod)
+            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod,"")
 
     # Pause before exit
     input("Nyomjon meg egy gombot a kilépéshez...")
