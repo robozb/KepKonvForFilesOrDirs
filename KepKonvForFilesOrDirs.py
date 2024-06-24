@@ -115,7 +115,7 @@ def main():
         if os.path.isdir(filepath):
             print("\n")
             process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum)
-            process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum)
+            print("\n")
         elif os.path.isfile(filepath) and filepath.lower().endswith('.jpg'):
             file_dir = os.path.dirname(filepath)
             output_dir = os.path.join(file_dir, "opt-webp-or-jpg")
