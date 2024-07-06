@@ -66,3 +66,10 @@ A `KepKonvForFilesOrDirs.reg` fájl olyan Windows regisztrációs beállítások
 
 - KepKonvForFilesOrDirs-SendTo.bat
 
+# Python to Win10 exe
+
+Disable Antivirus(Avat) for 10 mins
+
+auto-py-to-exe 
+
+<img src="./Py2Exe.jpg"/>
