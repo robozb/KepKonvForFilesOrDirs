@@ -34,14 +34,18 @@ def get_prefix_suffix(file_dir, global_prefix, global_suffix):
     return prefix, suffix
 
 def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message):
-    # Create parent directory for dest_file if it does not exist
     dest_dir = os.path.dirname(dest_file)
     os.makedirs(dest_dir, exist_ok=True)
-    
-    # Ellenőrizze, hogy a célfájl létezik-e
-    overwrite_notice = " ....FELÜLÍRÁS TÖRTÉNT!!!!" if os.path.exists(dest_file) else ""
 
-    print(f"Feldolgozás: {message} {src_file} -> {dest_file}{overwrite_notice}")
+    # Ellenőrizze a forrásfájl kiterjesztését
+    src_extension = os.path.splitext(src_file)[1].lower()
+
+    # Ha a forrás PNG, akkor adjuk hozzá a .png kiterjesztést a célfájlnévhez
+    if src_extension == ".png":
+        dest_file = os.path.splitext(dest_file)[0] + ".png" + os.path.splitext(dest_file)[1]
+        print(f"PNG forrás - hozzáadott kiterjesztés: {dest_file}")
+
+    print(f"Feldolgozás: {message} {src_file} -> {dest_file}")
 
     if mod == "n":
         subprocess.run([
@@ -56,7 +60,7 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
         ])
 
 def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir):
-    files = [f for f in os.listdir(directory) if f.lower().endswith('.jpg')]
+    files = [f for f in os.listdir(directory) if f.lower().endswith(('.jpg', '.png'))]
     total_files = len(files)
     current_file = 0
     
@@ -145,7 +149,7 @@ def main():
             print("\n")
             process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir)
             print("\n")
-        elif os.path.isfile(filepath) and filepath.lower().endswith('.jpg'):
+        elif os.path.isfile(filepath) and filepath.lower().endswith(('.jpg', '.png')):
             file_dir = os.path.dirname(filepath)
             
             if output_base_dir:
