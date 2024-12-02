@@ -33,7 +33,7 @@ def get_prefix_suffix(file_dir, global_prefix, global_suffix):
 
     return prefix, suffix
 
-def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message):
+def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message, background_color="white"):
     dest_dir = os.path.dirname(dest_file)
     os.makedirs(dest_dir, exist_ok=True)
 
@@ -49,15 +49,23 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
 
     if mod == "n":
         subprocess.run([
-            "magick", "convert", src_file, "-auto-orient", 
+            "magick", "convert", src_file, "-auto-orient",
             "-thumbnail", f"{szelesseg}x{magassag}>", "-quality", str(minoseg), dest_file
         ])
-    else:
+    elif mod == "c":
         subprocess.run([
-            "magick", src_file, "-auto-orient", 
-            "-resize", f"{szelesseg}x{magassag}^^", "-quality", str(minoseg), 
+            "magick", src_file, "-auto-orient",
+            "-resize", f"{szelesseg}x{magassag}^^", "-quality", str(minoseg),
             "-gravity", "center", "-extent", f"{szelesseg}x{magassag}", dest_file
         ])
+    elif mod == "t":
+        subprocess.run([
+            "magick", src_file, "-auto-orient",
+            "-resize", f"{szelesseg}x{magassag}", "-background", background_color,
+            "-gravity", "center", "-extent", f"{szelesseg}x{magassag}", "-quality", str(minoseg), dest_file
+        ])
+    else:
+        print(f"Ismeretlen mód: {mod}")
 
 def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir):
     files = [f for f in os.listdir(directory) if f.lower().endswith(('.jpg', '.png'))]
@@ -128,12 +136,16 @@ def main():
     print(f"Kiválasztott minoseg: {minoseg}")
 
     # Set mod
-    mod = get_input("\nVálassza ki a modot (n = normal(default), c = crop): ", default="n")
-    if mod not in ["n", "c"]:
+    mod = get_input("\nVálassza ki a modot (n = normal(default), c = crop, t = contain): ", default="n")
+    if mod not in ["n", "c", "t"]:
         mod = "n"
-    else:
-        print("cover (vigyázz: upscale lehetséges!)")
     print(f"Kiválasztott mód: {mod}")
+    
+    # Set background color, ha "contain" mód van
+    background_color = "white"  # alapértelmezett
+    if mod == "t":
+        background_color = get_input("\nAdja meg a háttér színét (pl. white, black, transparent,#gghh22) (default: white): ", default="white")
+        print(f"Kiválasztott háttér színe: {background_color}")    
 
     # Set formatum
     formatum = get_input("\nVálassza ki a formatumot (w = webp(default), j = jpg): ", default="w")
@@ -160,7 +172,7 @@ def main():
             prefix, suffix = get_prefix_suffix(file_dir, global_prefix, global_suffix)
             filename = os.path.splitext(os.path.basename(filepath))[0]
             output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
-            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, "")
+            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, "",background_color)
 
     # Pause before exit
     input("Nyomjon meg egy gombot a kilépéshez...")
