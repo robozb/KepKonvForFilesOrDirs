@@ -1,6 +1,8 @@
 import os
 import sys
 import subprocess
+from datetime import datetime  # Importáljuk a datetime modult
+
 
 def get_input(prompt, default=None):
     value = input(prompt)
@@ -175,6 +177,7 @@ def main():
             convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, "",background_color)
 
     # Pause before exit
+    print("\nFeldolgozás vége: ", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     input("Nyomjon meg egy gombot a kilépéshez...")
 
 if __name__ == "__main__":
