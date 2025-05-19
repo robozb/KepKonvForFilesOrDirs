@@ -4,6 +4,7 @@ import subprocess
 from datetime import datetime  # Importáljuk a datetime modult
 
 
+
 def get_input(prompt, default=None):
     value = input(prompt)
     if not value and default is not None:
@@ -35,7 +36,7 @@ def get_prefix_suffix(file_dir, global_prefix, global_suffix):
 
     return prefix, suffix
 
-def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message, background_color="white"):
+def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message, background_color="white",preserve_dates):
     dest_dir = os.path.dirname(dest_file)
     os.makedirs(dest_dir, exist_ok=True)
 
@@ -68,8 +69,73 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
         ])
     else:
         print(f"Ismeretlen mód: {mod}")
+    # Dátumok átmásolása
+    if preserve_dates:
+       set_all_dates_from_file(src_file, dest_file)
+        
+def set_all_dates_from_file(src, dest):
+    import datetime
 
-def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir):
+    try:
+        EXIFTOOL_PATH = r"exiftool.exe"
+        src = os.path.normpath(src)
+        dest = os.path.normpath(dest)
+
+        # Fájlrendszerből olvassuk ki a pontos időt
+        stat = os.stat(src)
+        mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
+        formatted = mtime.strftime("%Y:%m:%d %H:%M:%S")
+
+        # Ezt az értéket írjuk be MINDEN mezőbe
+        subprocess.run([
+            EXIFTOOL_PATH,
+            "-overwrite_original",
+            f"-AllDates={formatted}",
+            f"-DateTimeOriginal={formatted}",
+            f"-CreateDate={formatted}",
+            f"-ModifyDate={formatted}",
+            f"-FileCreateDate={formatted}",
+            f"-FileModifyDate={formatted}",
+            dest
+        ], check=True)
+
+    except subprocess.CalledProcessError as e:
+        print(f"[Exiftool] dátum másolás hiba: {e}")
+    except Exception as e:
+        print(f"[Exiftool] általános hiba: {e}")
+
+
+"""
+    1. „Létrehozva” ≠ mikor készült a kép
+    Ez a fájlrendszer szerinti dátum, amikor ez a példány létrejött az adott mappában (pl. másoláskor).
+
+    Ha C:-ről átmásolod F:-re, akkor másolás dátuma lesz a „létrehozás”, nem a fotó készítési ideje.
+
+    2. „Módosítva” = tartalom utolsó módosítása
+    Ha a fájl valaha át lett szerkesztve (akár iPhone, akár backup során), ez a dátum tükrözi azt.
+
+    De ez is változhat másolás, mentés, backup során!
+
+    3. „Hozzáférés” = mikor néztél rá
+    Ez minden egyes megnyitásnál frissül. Ez tök haszontalan a valódi dátum szempontjából.
+
+    4. A „Részletek” fül (EXIF) → az igazi időpont
+    Oda menti a kamera az igazi dátumokat: DateTimeOriginal, CreateDate, ModifyDate
+
+    Ezek nem látszanak az „Általános” fülön
+
+     Na akkor: Milyen dátumot látunk az Explorerben?
+    A lista nézet „Dátum” oszlopa (amit a fájllista tetején látsz):
+    Fájltípus	„Dátum” mező jelentése
+    📷 .JPG, .PNG, .MOV stb. (fénykép/video)	az EXIF DateTimeOriginal mezőt mutatja, ha van
+    📄 más típusú fájl	a fájlrendszer szerinti „Módosítva” időt
+    📄 .webp fájl	nincs EXIF támogatás → fájlrendszer „módosítva” dátum
+    📌 Vagyis a „Dátum” oszlop nem a fájlrendszer szerinti „létrehozás” dátumát mutatja.
+"""
+
+     
+
+def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir,preserve_dates):
     files = [f for f in os.listdir(directory) if f.lower().endswith(('.jpg', '.png'))]
     total_files = len(files)
     current_file = 0
@@ -88,7 +154,7 @@ def process_directory(directory, global_prefix, global_suffix, szelesseg, magass
         output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
         
         current_file += 1
-        convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, f"{current_file}/{total_files}")
+        convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, f"{current_file}/{total_files}",preserve_dates)
 
 def main():
 
@@ -136,6 +202,10 @@ def main():
     # Set minoseg
     minoseg = get_input("\nAdja meg a minoseget (default:75): ", default="75")
     print(f"Kiválasztott minoseg: {minoseg}")
+    
+    # Kérdés a dátumok megőrzéséről
+    preserve_input = get_input("\nMeg akarja őrizni az eredeti dátumokat? (i/n, default: i): ", default="i")
+    preserve_dates = preserve_input.lower() == "i"    
 
     # Set mod
     mod = get_input("\nVálassza ki a modot (n = normal(default), c = crop, t = contain): ", default="n")
@@ -161,7 +231,7 @@ def main():
     for filepath in sys.argv[1:]:
         if os.path.isdir(filepath):
             print("\n")
-            process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir)
+            process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir,preserve_dates=True)
             print("\n")
         elif os.path.isfile(filepath) and filepath.lower().endswith(('.jpg', '.png')):
             file_dir = os.path.dirname(filepath)
@@ -174,7 +244,7 @@ def main():
             prefix, suffix = get_prefix_suffix(file_dir, global_prefix, global_suffix)
             filename = os.path.splitext(os.path.basename(filepath))[0]
             output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
-            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, "",background_color)
+            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, "",background_color, preserve_dates=True)
 
     # Pause before exit
     print("\nFeldolgozás vége: ", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -182,3 +252,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
