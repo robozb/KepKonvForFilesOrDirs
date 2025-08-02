@@ -36,7 +36,7 @@ def get_prefix_suffix(file_dir, global_prefix, global_suffix):
 
     return prefix, suffix
 
-def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message, background_color="white",preserve_dates):
+def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message, background_color="white",preserve_dates=True):
     dest_dir = os.path.dirname(dest_file)
     os.makedirs(dest_dir, exist_ok=True)
 
@@ -135,8 +135,8 @@ def set_all_dates_from_file(src, dest):
 
      
 
-def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir,preserve_dates):
-    files = [f for f in os.listdir(directory) if f.lower().endswith(('.jpg', '.png'))]
+def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir,preserve_dates=True):
+    files = [f for f in os.listdir(directory) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
     total_files = len(files)
     current_file = 0
     
@@ -233,7 +233,7 @@ def main():
             print("\n")
             process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir,preserve_dates=True)
             print("\n")
-        elif os.path.isfile(filepath) and filepath.lower().endswith(('.jpg', '.png')):
+        elif os.path.isfile(filepath) and filepath.lower().endswith(('.jpg', '.jpeg', '.png')):
             file_dir = os.path.dirname(filepath)
             
             if output_base_dir:
