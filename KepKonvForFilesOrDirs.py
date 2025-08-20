@@ -51,10 +51,20 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
     print(f"Feldolgozás: {message} {src_file} -> {dest_file}")
 
     if mod == "n":
-        subprocess.run([
+        params = [
             "magick", "convert", src_file, "-auto-orient",
-            "-thumbnail", f"{szelesseg}x{magassag}>", "-quality", str(minoseg), dest_file
-        ])
+            "-thumbnail", f"{szelesseg}x{magassag}>", "-quality", str(minoseg)
+        ]
+
+        if dest_file.lower().endswith(".avif"):
+            params.extend([
+                "-define", "heic:compression=av1",
+                "-define", "heic:speed=6",
+                "-define", f"heic:quality={minoseg}"
+            ])
+
+        params.append(dest_file)
+        subprocess.run(params)
     elif mod == "c":
         subprocess.run([
             "magick", src_file, "-auto-orient",
@@ -74,7 +84,12 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
        set_all_dates_from_file(src_file, dest_file)
         
 def set_all_dates_from_file(src, dest):
+    
     import datetime
+
+    if dest.lower().endswith(".avif"):
+        print("[Exiftool] ⚠️ Az AVIF fájlformátum nem támogatja az EXIF metaadatok írását. Dátum nem másolható.")
+        return
 
     try:
         EXIFTOOL_PATH = r"exiftool.exe"
@@ -185,6 +200,7 @@ def main():
         global_prefix = f"{global_prefix}-"
         print(f"Kiválasztott globális prefix: {global_prefix}")
 
+
     # Set global suffix
     global_suffix = get_input("\nAdja meg a globális suffixet (vagy hagyja üresen): ")
     if global_suffix:
@@ -220,11 +236,14 @@ def main():
         print(f"Kiválasztott háttér színe: {background_color}")    
 
     # Set formatum
-    formatum = get_input("\nVálassza ki a formatumot (w = webp(default), j = jpg): ", default="w")
-    if formatum not in ["j"]:
-        formatum = "webp"
-    elif formatum == "j":
+    formatum = get_input("\nVálassza ki a formátumot (w = webp (default), j = jpg, a = avif): ", default="w")
+    if formatum == "j":
         formatum = "jpg"
+    elif formatum == "a":
+        formatum = "avif"
+    else:
+        formatum = "webp"
+
     print(f"Kiválasztott formátum: {formatum} \n")
 
     # Process files or directories
