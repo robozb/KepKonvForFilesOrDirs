@@ -46,7 +46,7 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
     # Ha a forrás PNG, akkor adjuk hozzá a .png kiterjesztést a célfájlnévhez
     if src_extension == ".png":
         dest_file = os.path.splitext(dest_file)[0] + ".png" + os.path.splitext(dest_file)[1]
-        print(f"PNG forrás - hozzáadott kiterjesztés: {dest_file}")
+        print(f"   PNG forrás - hozzáadott kiterjesztés: {dest_file}")
 
     print(f"Feldolgozás: {message} {src_file} -> {dest_file}")
 
@@ -84,11 +84,22 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
        set_all_dates_from_file(src_file, dest_file)
         
 def set_all_dates_from_file(src, dest):
-    
+    """
+    Improved date preservation function that copies both EXIF dates and filesystem dates
+    """
     import datetime
+    import os
+    import subprocess
 
     if dest.lower().endswith(".avif"):
-        print("[Exiftool] ⚠️ Az AVIF fájlformátum nem támogatja az EXIF metaadatok írását. Dátum nem másolható.")
+        print("   [Exiftool] ⚠️ Az AVIF fájlformátum nem támogatja az EXIF metaadatok írását. Csak fájlrendszer dátum másolható.")
+        # Still copy filesystem dates for AVIF
+        try:
+            stat = os.stat(src)
+            os.utime(dest, (stat.st_atime, stat.st_mtime))
+            print(f"   [Filesystem] Dátumok másolva: {src} -> {dest}")
+        except Exception as e:
+            print(f"   [Filesystem] Hiba a dátum másoláskor: {e}")
         return
 
     try:
@@ -96,28 +107,75 @@ def set_all_dates_from_file(src, dest):
         src = os.path.normpath(src)
         dest = os.path.normpath(dest)
 
-        # Fájlrendszerből olvassuk ki a pontos időt
+        # Get original file's filesystem timestamps
         stat = os.stat(src)
-        mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
-        formatted = mtime.strftime("%Y:%m:%d %H:%M:%S")
-
-        # Ezt az értéket írjuk be MINDEN mezőbe
-        subprocess.run([
+        
+        # Method 1: Try to copy EXIF data from source to destination
+        print(f"   [Exiftool] EXIF adatok másolása: {src} -> {dest}")
+        
+        # Copy all date-related EXIF fields from source
+        exif_result = subprocess.run([
             EXIFTOOL_PATH,
             "-overwrite_original",
-            f"-AllDates={formatted}",
-            f"-DateTimeOriginal={formatted}",
-            f"-CreateDate={formatted}",
-            f"-ModifyDate={formatted}",
-            f"-FileCreateDate={formatted}",
-            f"-FileModifyDate={formatted}",
+            "-TagsFromFile", src,
+            "-AllDates",
+            "-DateTimeOriginal",
+            "-CreateDate", 
+            "-ModifyDate",
+            "-DateTimeDigitized",
             dest
-        ], check=True)
+        ], capture_output=True, text=True)
+
+        if exif_result.returncode == 0:
+            print(f"   [Exiftool] EXIF dátumok sikeresen másolva")
+        else:
+            print(f"   [Exiftool] EXIF másolás részben sikeres vagy problémás: {exif_result.stderr}")
+            
+            # Fallback: Set dates manually based on filesystem
+            mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
+            formatted = mtime.strftime("%Y:%m:%d %H:%M:%S")
+            
+            fallback_result = subprocess.run([
+                EXIFTOOL_PATH,
+                "-overwrite_original",
+                f"-AllDates={formatted}",
+                f"-DateTimeOriginal={formatted}",
+                f"-CreateDate={formatted}",
+                f"-ModifyDate={formatted}",
+                dest
+            ], capture_output=True, text=True)
+            
+            if fallback_result.returncode == 0:
+                print(f"   [Exiftool] Fallback: Dátumok beállítva filesystem alapján")
+            else:
+                print(f"   [Exiftool] Fallback is failed: {fallback_result.stderr}")
+
+        # Method 2: Always copy filesystem dates as well
+        print(f"   [Filesystem] Filesystem dátumok másolása...")
+        os.utime(dest, (stat.st_atime, stat.st_mtime))
+        print(f"   [Filesystem] Filesystem dátumok sikeresen másolva")
 
     except subprocess.CalledProcessError as e:
-        print(f"[Exiftool] dátum másolás hiba: {e}")
+        print(f"[Exiftool] Subprocess hiba: {e}")
+        # Try to at least copy filesystem dates
+        try:
+            stat = os.stat(src)
+            os.utime(dest, (stat.st_atime, stat.st_mtime))
+            print(f"[Filesystem] Legalább filesystem dátumok másolva")
+        except Exception as fs_e:
+            print(f"[Filesystem] Filesystem dátum másolás is failed: {fs_e}")
+            
+    except FileNotFoundError:
+        print(f"[Exiftool] exiftool.exe nem található. Csak filesystem dátumok másolása...")
+        try:
+            stat = os.stat(src)
+            os.utime(dest, (stat.st_atime, stat.st_mtime))
+            print(f"[Filesystem] Filesystem dátumok másolva")
+        except Exception as e:
+            print(f"[Filesystem] Filesystem dátum másolás failed: {e}")
+            
     except Exception as e:
-        print(f"[Exiftool] általános hiba: {e}")
+        print(f"[Exiftool] Általános hiba: {e}")
 
 
 """
