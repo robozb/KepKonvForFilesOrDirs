@@ -1,7 +1,18 @@
 import os
 import sys
 import subprocess
-from datetime import datetime  # Importáljuk a datetime modult
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from dataclasses import dataclass
+from datetime import datetime
+from photo_dates import PhotoDatePreserver
+
+# Egyszerre feldolgozott képek felső korlátja (a gép magszáma is korlátoz).
+DEFAULT_WORKERS = 6
+# Képenkénti ImageMagick pixelgyorsítótár-limit gigabájtban. Ez felső korlát,
+# nem lefoglalás: az ImageMagick csak annyit használ, amennyi a képhez kell.
+DEFAULT_MEMORY_LIMIT_GB = 15
 
 
 
@@ -36,26 +47,47 @@ def get_prefix_suffix(file_dir, global_prefix, global_suffix):
 
     return prefix, suffix
 
-def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message, background_color="white",preserve_dates=True):
-    dest_dir = os.path.dirname(dest_file)
-    os.makedirs(dest_dir, exist_ok=True)
+SUPPORTED_INPUTS = ('.jpg', '.jpeg', '.png')
 
-    # Ellenőrizze a forrásfájl kiterjesztését
-    src_extension = os.path.splitext(src_file)[1].lower()
 
-    # Ha a forrás PNG, akkor adjuk hozzá a .png kiterjesztést a célfájlnévhez
-    if src_extension == ".png":
-        dest_file = os.path.splitext(dest_file)[0] + ".png" + os.path.splitext(dest_file)[1]
-        print(f"   PNG forrás - hozzáadott kiterjesztés: {dest_file}")
+@dataclass(frozen=True)
+class ConversionJob:
+    source: str
+    destination: str
 
-    print(f"Feldolgozás: {message} {src_file} -> {dest_file}")
 
+@dataclass
+class BatchResult:
+    converted: int = 0
+    failed: int = 0
+    skipped: int = 0
+
+
+def output_path(src_file, dest_file):
+    """A PNG névkiegészítés egyetlen közös helyen történik."""
+    if os.path.splitext(src_file)[1].lower() == '.png':
+        stem, extension = os.path.splitext(dest_file)
+        return stem + '.png' + extension
+    return dest_file
+
+
+def _path_key(path):
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+
+def _magick_command(src_file, dest_file, szelesseg, magassag, minoseg, mod,
+                    background_color, thread_limit=None,
+                    memory_limit_gb=DEFAULT_MEMORY_LIMIT_GB):
+    params = ['magick']
+    if thread_limit is not None:
+        params += ['-limit', 'thread', str(thread_limit)]
+    if memory_limit_gb:
+        # A map limit a memórialimit kétszerese, ahogy az ImageMagick ajánlja.
+        params += ['-limit', 'memory', f'{memory_limit_gb:g}GiB',
+                   '-limit', 'map', f'{memory_limit_gb * 2:g}GiB']
+    params += [src_file, '-auto-orient']
     if mod == "n":
-        params = [
-            "magick", src_file, "-auto-orient",
-            "-thumbnail", f"{szelesseg}x{magassag}>", "-quality", str(minoseg)
-        ]
-
+        params += ['-thumbnail', f'{szelesseg}x{magassag}>', '-quality', str(minoseg)]
         if dest_file.lower().endswith(".avif"):
             params.extend([
                 "-define", "heic:compression=av1",
@@ -63,171 +95,210 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
                 "-define", f"heic:quality={minoseg}"
             ])
 
-        params.append(dest_file)
-        subprocess.run(params)
     elif mod == "c":
-        subprocess.run([
-            "magick", src_file, "-auto-orient",
+        params.extend([
             "-resize", f"{szelesseg}x{magassag}^", "-quality", str(minoseg),
-            "-gravity", "center", "-extent", f"{szelesseg}x{magassag}", dest_file
+            "-gravity", "center", "-extent", f"{szelesseg}x{magassag}"
         ])
     elif mod == "t":
-        subprocess.run([
-            "magick", src_file, "-auto-orient",
+        params.extend([
             "-resize", f"{szelesseg}x{magassag}", "-background", background_color,
-            "-gravity", "center", "-extent", f"{szelesseg}x{magassag}", "-quality", str(minoseg), dest_file
+            "-gravity", "center", "-extent", f"{szelesseg}x{magassag}", "-quality", str(minoseg)
         ])
     else:
-        print(f"Ismeretlen mód: {mod}")
-    # Dátumok átmásolása
-    if preserve_dates:
-       set_all_dates_from_file(src_file, dest_file)
-        
-def set_all_dates_from_file(src, dest):
-    """
-    Improved date preservation function that copies both EXIF dates and filesystem dates
-    """
-    import datetime
-    import os
-    import subprocess
+        raise ValueError(f'Ismeretlen mód: {mod}')
+    return params + [dest_file]
 
-    if dest.lower().endswith(".avif"):
-        print("   [Exiftool] ⚠️ Az AVIF fájlformátum nem támogatja az EXIF metaadatok írását. Csak fájlrendszer dátum másolható.")
-        # Still copy filesystem dates for AVIF
-        try:
-            stat = os.stat(src)
-            os.utime(dest, (stat.st_atime, stat.st_mtime))
-            print(f"   [Filesystem] Dátumok másolva: {src} -> {dest}")
-        except Exception as e:
-            print(f"   [Filesystem] Hiba a dátum másoláskor: {e}")
-        return
 
+def _run_conversion(job, szelesseg, magassag, minoseg, mod, background_color,
+                    thread_limit=None, memory_limit_gb=DEFAULT_MEMORY_LIMIT_GB):
+    """Csak képkonverzió; nincs közös ExifTool-hívás vagy konzolírás a workerben.
+
+    A részleges kimenet ideiglenes fájl, a publikálás nem ír felül létező célt.
+    Az üres visszatérési érték sikert, a szöveg hibát jelent.
+    """
+    temp_path = None
     try:
-        EXIFTOOL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exiftool.exe")
-        src = os.path.normpath(src)
-        dest = os.path.normpath(dest)
-
-        # Get original file's filesystem timestamps
-        stat = os.stat(src)
-        
-        # Method 1: Try to copy EXIF data from source to destination
-        print(f"   [Exiftool] EXIF adatok másolása: {src} -> {dest}")
-        
-        # Copy all date-related EXIF fields from source
-        exif_result = subprocess.run([
-            EXIFTOOL_PATH,
-            "-overwrite_original",
-            "-TagsFromFile", src,
-            "-AllDates",
-            "-DateTimeOriginal",
-            "-CreateDate", 
-            "-ModifyDate",
-            "-DateTimeDigitized",
-            dest
-        ], capture_output=True, text=True)
-
-        if exif_result.returncode == 0:
-            print(f"   [Exiftool] EXIF dátumok sikeresen másolva")
+        if _path_key(job.source) == _path_key(job.destination):
+            return 'A célfájl azonos a forrással.'
+        if os.path.lexists(job.destination):
+            return 'A célfájl már létezik; nem írtam felül.'
+        dest_dir = os.path.dirname(os.path.abspath(job.destination))
+        os.makedirs(dest_dir, exist_ok=True)
+        descriptor, temp_path = tempfile.mkstemp(
+            prefix='.kepkonv-', suffix=os.path.splitext(job.destination)[1], dir=dest_dir)
+        os.close(descriptor)
+        command = _magick_command(job.source, temp_path, szelesseg, magassag,
+                                  minoseg, mod, background_color, thread_limit,
+                                  memory_limit_gb)
+        result = subprocess.run(command, capture_output=True, text=True, errors='replace')
+        if result.returncode != 0:
+            return (result.stderr or result.stdout or f'ImageMagick hibakód: {result.returncode}').strip()
+        if os.path.getsize(temp_path) == 0:
+            return 'Az ImageMagick nem hozott létre képet.'
+        if os.name == 'nt':
+            os.rename(temp_path, job.destination)  # Windows: létező célnál hibát ad.
         else:
-            print(f"   [Exiftool] EXIF másolás részben sikeres vagy problémás: {exif_result.stderr}")
-            
-            # Fallback: Set dates manually based on filesystem
-            mtime = datetime.datetime.fromtimestamp(stat.st_mtime)
-            formatted = mtime.strftime("%Y:%m:%d %H:%M:%S")
-            
-            fallback_result = subprocess.run([
-                EXIFTOOL_PATH,
-                "-overwrite_original",
-                f"-AllDates={formatted}",
-                f"-DateTimeOriginal={formatted}",
-                f"-CreateDate={formatted}",
-                f"-ModifyDate={formatted}",
-                dest
-            ], capture_output=True, text=True)
-            
-            if fallback_result.returncode == 0:
-                print(f"   [Exiftool] Fallback: Dátumok beállítva filesystem alapján")
+            os.link(temp_path, job.destination)  # Nem felülíró publikálás POSIX alatt is.
+            os.unlink(temp_path)
+        temp_path = None
+        return ''
+    except (OSError, ValueError) as exc:
+        return str(exc)
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
+def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, message, background_color="white", preserve_dates=True, date_preserver=None):
+    dest_file = output_path(src_file, dest_file)
+    print(f"Feldolgozás: {message} {src_file} -> {dest_file}")
+    error = _run_conversion(ConversionJob(src_file, dest_file), szelesseg, magassag,
+                            minoseg, mod, background_color)
+    if error:
+        print(f'Hiba: {src_file}: {error}')
+        return False
+    if preserve_dates:
+        set_all_dates_from_file(src_file, dest_file, date_preserver)
+    return True
+
+
+def set_all_dates_from_file(src, dest, date_preserver=None):
+    """Készítési idő megőrzése EXIF-ben és fájl-módosítási időként.
+
+    A létrehozási időt nem állítjuk. Hiányzó EXIF készítési időt nem
+    helyettesítünk a forrásfájl módosítási idejével.
+    """
+    if date_preserver is not None:
+        return date_preserver.copy(src, dest)
+    with PhotoDatePreserver() as dates:
+        return dates.copy(src, dest)
+
+
+def plan_conversions(paths, global_prefix, global_suffix, formatum, output_base_dir):
+    """Az egész bemenetre kiterjedő, determinisztikus névütközés-ellenőrzés."""
+    sources, seen_sources, jobs, reserved, affixes = [], set(), [], set(), {}
+    skipped = 0
+
+    def skip(path, reason):
+        nonlocal skipped
+        skipped += 1
+        print(f'Kihagyva: {path} — {reason}')
+
+    for path in paths:
+        path = os.path.abspath(path)
+        try:
+            if os.path.isdir(path):
+                candidates = [os.path.join(path, name) for name in sorted(os.listdir(path), key=str.casefold)
+                              if name.lower().endswith(SUPPORTED_INPUTS)]
             else:
-                print(f"   [Exiftool] Fallback is failed: {fallback_result.stderr}")
+                candidates = [path]
+            for source in candidates:
+                if not os.path.isfile(source) or not source.lower().endswith(SUPPORTED_INPUTS):
+                    skip(source, 'nem támogatott vagy nem létező képfájl')
+                    continue
+                key = _path_key(source)
+                if key in seen_sources:
+                    skip(source, 'a bemenet már szerepel a feldolgozásban')
+                    continue
+                seen_sources.add(key)
+                sources.append(source)
+        except OSError as exc:
+            skip(path, str(exc))
 
-        # Method 2: Always copy filesystem dates as well
-        print(f"   [Filesystem] Filesystem dátumok másolása...")
-        os.utime(dest, (stat.st_atime, stat.st_mtime))
-        print(f"   [Filesystem] Filesystem dátumok sikeresen másolva")
-
-    except subprocess.CalledProcessError as e:
-        print(f"[Exiftool] Subprocess hiba: {e}")
-        # Try to at least copy filesystem dates
+    for source in sources:
         try:
-            stat = os.stat(src)
-            os.utime(dest, (stat.st_atime, stat.st_mtime))
-            print(f"[Filesystem] Legalább filesystem dátumok másolva")
-        except Exception as fs_e:
-            print(f"[Filesystem] Filesystem dátum másolás is failed: {fs_e}")
-            
-    except FileNotFoundError:
-        print(f"[Exiftool] exiftool.exe nem található. Csak filesystem dátumok másolása...")
-        try:
-            stat = os.stat(src)
-            os.utime(dest, (stat.st_atime, stat.st_mtime))
-            print(f"[Filesystem] Filesystem dátumok másolva")
-        except Exception as e:
-            print(f"[Filesystem] Filesystem dátum másolás failed: {e}")
-            
-    except Exception as e:
-        print(f"[Exiftool] Általános hiba: {e}")
+            directory = os.path.dirname(source)
+            if directory not in affixes:
+                affixes[directory] = get_prefix_suffix(directory, global_prefix, global_suffix)
+            prefix, suffix = affixes[directory]
+            output_dir = output_base_dir or os.path.join(directory, 'opt-webp-or-jpg')
+            filename = os.path.splitext(os.path.basename(source))[0]
+            destination = os.path.abspath(output_path(
+                source, os.path.join(output_dir, f'{prefix}{filename}{suffix}.{formatum}')))
+            key = _path_key(destination)
+            if key in seen_sources:
+                skip(source, f'a cél egy bemeneti fájl: {destination}')
+            elif os.path.lexists(destination):
+                skip(source, f'a cél már létezik: {destination}')
+            elif key in reserved:
+                skip(source, f'egy korábbi bemenetnek ugyanez a célja: {destination}')
+            else:
+                reserved.add(key)
+                jobs.append(ConversionJob(source, destination))
+        except (OSError, ValueError) as exc:
+            skip(source, str(exc))
+    return jobs, skipped
 
 
-"""
-    1. „Létrehozva” ≠ mikor készült a kép
-    Ez a fájlrendszer szerinti dátum, amikor ez a példány létrejött az adott mappában (pl. másoláskor).
+def run_batch(jobs, szelesseg, magassag, minoseg, mod, background_color='white',
+              preserve_dates=True, date_preserver=None, skipped=0,
+              memory_limit_gb=DEFAULT_MEMORY_LIMIT_GB, max_workers=DEFAULT_WORKERS):
+    if preserve_dates and date_preserver is None:
+        with PhotoDatePreserver() as dates:
+            result = run_batch(jobs, szelesseg, magassag, minoseg, mod,
+                               background_color, preserve_dates, dates, skipped,
+                               memory_limit_gb, max_workers)
+            dates.summary()
+            return result
+    result = BatchResult(skipped=skipped)
+    if not jobs:
+        print(f'Konverzió: 0 sikeres, 0 hibás, {skipped} kihagyott.')
+        return result
+    cpu_count = os.cpu_count() or 1
+    workers = min(len(jobs), max(1, max_workers), max(1, cpu_count // 2))
+    # Egyetlen képhez marad az ImageMagick saját szálbeállítása.
+    threads = 2 if workers > 1 else None
+    print(f'Konvertálás: {len(jobs)} kép, legfeljebb {workers} párhuzamos feldolgozás, '
+          f'képenként {memory_limit_gb:g} GB memórialimit.')
+    started = time.perf_counter()
+    iterator = iter(jobs)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = {}
 
-    Ha C:-ről átmásolod F:-re, akkor másolás dátuma lesz a „létrehozás”, nem a fotó készítési ideje.
+        def submit_next():
+            job = next(iterator, None)
+            if job is not None:
+                future = executor.submit(_run_conversion, job, szelesseg, magassag,
+                                         minoseg, mod, background_color, threads,
+                                         memory_limit_gb)
+                pending[future] = job
 
-    2. „Módosítva” = tartalom utolsó módosítása
-    Ha a fájl valaha át lett szerkesztve (akár iPhone, akár backup során), ez a dátum tükrözi azt.
+        # Csak korlátozott számú munka kerül a sorba, sok ezer képnél is.
+        for _ in range(workers * 2):
+            submit_next()
+        while pending:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                job = pending.pop(future)
+                submit_next()  # A CPU a dátummásolás közben is dolgozhat.
+                try:
+                    error = future.result()
+                except Exception as exc:
+                    error = str(exc) or type(exc).__name__
+                if error:
+                    result.failed += 1
+                    print(f'Hiba: {job.source}: {error}')
+                else:
+                    result.converted += 1
+                    # Kizárólag a fő szál használja az egyetlen ExifTool-folyamatot.
+                    if preserve_dates:
+                        date_preserver.copy(job.source, job.destination)
+                done = result.converted + result.failed
+                print(f'[{done}/{len(jobs)}] {"Hibás" if error else "Kész"}: {job.source} -> {job.destination}')
+    print(f'Konverzió: {result.converted} sikeres, {result.failed} hibás, '
+          f'{result.skipped} kihagyott; {time.perf_counter() - started:.1f} másodperc.')
+    return result
 
-    De ez is változhat másolás, mentés, backup során!
 
-    3. „Hozzáférés” = mikor néztél rá
-    Ez minden egyes megnyitásnál frissül. Ez tök haszontalan a valódi dátum szempontjából.
-
-    4. A „Részletek” fül (EXIF) → az igazi időpont
-    Oda menti a kamera az igazi dátumokat: DateTimeOriginal, CreateDate, ModifyDate
-
-    Ezek nem látszanak az „Általános” fülön
-
-     Na akkor: Milyen dátumot látunk az Explorerben?
-    A lista nézet „Dátum” oszlopa (amit a fájllista tetején látsz):
-    Fájltípus	„Dátum” mező jelentése
-    📷 .JPG, .PNG, .MOV stb. (fénykép/video)	az EXIF DateTimeOriginal mezőt mutatja, ha van
-    📄 más típusú fájl	a fájlrendszer szerinti „Módosítva” időt
-    📄 .webp fájl	nincs EXIF támogatás → fájlrendszer „módosítva” dátum
-    📌 Vagyis a „Dátum” oszlop nem a fájlrendszer szerinti „létrehozás” dátumát mutatja.
-"""
-
-     
-
-def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir, background_color="white", preserve_dates=True):
-    files = [f for f in os.listdir(directory) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-    total_files = len(files)
-    current_file = 0
-    
-    for file in files:
-        filepath = os.path.join(directory, file)
-        file_dir = os.path.dirname(filepath)
-        
-        if output_base_dir:
-            output_dir = output_base_dir
-        else:
-            output_dir = os.path.join(file_dir, "opt-webp-or-jpg")
-        
-        prefix, suffix = get_prefix_suffix(file_dir, global_prefix, global_suffix)
-        filename = os.path.splitext(os.path.basename(filepath))[0]
-        output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
-        
-        current_file += 1
-        convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, f"{current_file}/{total_files}", background_color=background_color, preserve_dates=preserve_dates)
+def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir, background_color="white", preserve_dates=True, date_preserver=None, memory_limit_gb=DEFAULT_MEMORY_LIMIT_GB, max_workers=DEFAULT_WORKERS):
+    jobs, skipped = plan_conversions([directory], global_prefix, global_suffix, formatum, output_base_dir)
+    return run_batch(jobs, szelesseg, magassag, minoseg, mod, background_color,
+                     preserve_dates, date_preserver, skipped,
+                     memory_limit_gb, max_workers)
 
 def main():
 
@@ -250,7 +321,7 @@ def main():
     if output_base_dir:
         print(f"Kiválasztott cél mappa: {output_base_dir}")
     else:
-        print("A konvertált fájlok az eredeti helyükön maradnak.")
+        print("A konvertált fájlok a forrás melletti opt-webp-or-jpg almappába kerülnek.")
 
     # Set global prefix
     global_prefix = get_input("\nAdja meg a globális prefixet (vagy hagyja üresen): ")
@@ -278,8 +349,16 @@ def main():
     print(f"Kiválasztott minoseg: {minoseg}")
     
     # Kérdés a dátumok megőrzéséről
-    preserve_input = get_input("\nMeg akarja őrizni az eredeti dátumokat? (i/n, default: i): ", default="i")
-    preserve_dates = preserve_input.lower() == "i"    
+    while True:
+        preserve_input = get_input("\nMobilos készítési idő megőrzése (EXIF + módosítás dátuma)? (i/n, default: i): ", default="i").strip().lower()
+        if preserve_input in ("i", "n"):
+            break
+        print("Kérem, i vagy n értéket adjon meg.")
+    preserve_dates = preserve_input == "i"
+    if preserve_dates:
+        print("A készítési időt a kimeneti EXIF-be másoljuk, és erre állítjuk a fájl módosítási idejét; a létrehozási időt nem állítjuk.")
+    else:
+        print("Külön dátummásolás nem történik; ez nem jelent metaadat-törlést.")
 
     # Set mod
     mod = get_input("\nVálassza ki a modot (n = normal(default), c = crop, t = contain): ", default="n")
@@ -304,24 +383,27 @@ def main():
 
     print(f"Kiválasztott formátum: {formatum} \n")
 
-    # Process files or directories
-    for filepath in sys.argv[1:]:
-        if os.path.isdir(filepath):
-            print("\n")
-            process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir, background_color=background_color, preserve_dates=preserve_dates)
-            print("\n")
-        elif os.path.isfile(filepath) and filepath.lower().endswith(('.jpg', '.jpeg', '.png')):
-            file_dir = os.path.dirname(filepath)
-            
-            if output_base_dir:
-                output_dir = output_base_dir
-            else:
-                output_dir = os.path.join(file_dir, "opt-webp-or-jpg")
-            
-            prefix, suffix = get_prefix_suffix(file_dir, global_prefix, global_suffix)
-            filename = os.path.splitext(os.path.basename(filepath))[0]
-            output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
-            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, "", background_color=background_color, preserve_dates=preserve_dates)
+    # Képenkénti memórialimit: felső korlát, nem lefoglalás
+    while True:
+        memory_input = get_input(
+            f"\nKépenkénti memórialimit GB-ban (default: {DEFAULT_MEMORY_LIMIT_GB:g}): ",
+            default=str(DEFAULT_MEMORY_LIMIT_GB)).strip().replace(",", ".")
+        try:
+            memory_limit_gb = float(memory_input)
+        except ValueError:
+            memory_limit_gb = 0
+        if memory_limit_gb > 0:
+            break
+        print("Kérem, pozitív számot adjon meg.")
+    print(f"Kiválasztott memórialimit: {memory_limit_gb:g} GB képenként, "
+          f"legfeljebb {DEFAULT_WORKERS} párhuzamos képpel.")
+
+    jobs, skipped = plan_conversions(sys.argv[1:], global_prefix, global_suffix,
+                                    formatum, output_base_dir)
+    with PhotoDatePreserver(enabled=preserve_dates) as date_preserver:
+        run_batch(jobs, szelesseg, magassag, minoseg, mod, background_color,
+                  preserve_dates, date_preserver, skipped, memory_limit_gb)
+        date_preserver.summary()
 
     # Pause before exit
     print("\nFeldolgozás vége: ", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
