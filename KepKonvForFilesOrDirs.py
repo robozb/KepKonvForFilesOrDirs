@@ -52,7 +52,7 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
 
     if mod == "n":
         params = [
-            "magick", "convert", src_file, "-auto-orient",
+            "magick", src_file, "-auto-orient",
             "-thumbnail", f"{szelesseg}x{magassag}>", "-quality", str(minoseg)
         ]
 
@@ -68,7 +68,7 @@ def convert_image(src_file, dest_file, szelesseg, magassag, minoseg, mod, messag
     elif mod == "c":
         subprocess.run([
             "magick", src_file, "-auto-orient",
-            "-resize", f"{szelesseg}x{magassag}^^", "-quality", str(minoseg),
+            "-resize", f"{szelesseg}x{magassag}^", "-quality", str(minoseg),
             "-gravity", "center", "-extent", f"{szelesseg}x{magassag}", dest_file
         ])
     elif mod == "t":
@@ -103,7 +103,7 @@ def set_all_dates_from_file(src, dest):
         return
 
     try:
-        EXIFTOOL_PATH = r"exiftool.exe"
+        EXIFTOOL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exiftool.exe")
         src = os.path.normpath(src)
         dest = os.path.normpath(dest)
 
@@ -208,7 +208,7 @@ def set_all_dates_from_file(src, dest):
 
      
 
-def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir,preserve_dates=True):
+def process_directory(directory, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir, background_color="white", preserve_dates=True):
     files = [f for f in os.listdir(directory) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
     total_files = len(files)
     current_file = 0
@@ -227,7 +227,7 @@ def process_directory(directory, global_prefix, global_suffix, szelesseg, magass
         output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
         
         current_file += 1
-        convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, f"{current_file}/{total_files}",preserve_dates)
+        convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, f"{current_file}/{total_files}", background_color=background_color, preserve_dates=preserve_dates)
 
 def main():
 
@@ -308,7 +308,7 @@ def main():
     for filepath in sys.argv[1:]:
         if os.path.isdir(filepath):
             print("\n")
-            process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir,preserve_dates=True)
+            process_directory(filepath, global_prefix, global_suffix, szelesseg, magassag, minoseg, mod, formatum, output_base_dir, background_color=background_color, preserve_dates=preserve_dates)
             print("\n")
         elif os.path.isfile(filepath) and filepath.lower().endswith(('.jpg', '.jpeg', '.png')):
             file_dir = os.path.dirname(filepath)
@@ -321,7 +321,7 @@ def main():
             prefix, suffix = get_prefix_suffix(file_dir, global_prefix, global_suffix)
             filename = os.path.splitext(os.path.basename(filepath))[0]
             output_file = os.path.join(output_dir, f"{prefix}{filename}{suffix}.{formatum}")
-            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, "",background_color, preserve_dates=True)
+            convert_image(filepath, output_file, szelesseg, magassag, minoseg, mod, "", background_color=background_color, preserve_dates=preserve_dates)
 
     # Pause before exit
     print("\nFeldolgozás vége: ", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
