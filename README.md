@@ -120,6 +120,21 @@ python KepKonvForFilesOrDirs.py [konyvtar_vagy_fajl_1] [konyvtar_vagy_fajl_2] ..
 
 Ez a parancs a megadott képfájlokat és a megadott mappák közvetlen JPG/JPEG/PNG képeit konvertálja a bekért paraméterek alapján.
 
+A `--auto` kapcsolóval nem kérdez semmit, minden alapértéket elfogad (3840x2160, minőség 75, normál mód, WebP, dátummegőrzés, a forrás melletti `opt-webp-or-jpg` almappa), és a végén nem vár gombnyomásra:
+
+```
+python KepKonvForFilesOrDirs.py --auto [konyvtar_vagy_fajl_1] ...
+```
+
+### Mappafigyelő (app.py)
+
+A grafikus indítóban megadható egy figyelt mappa (beírva, tallózva vagy behúzva). A „Figyelés indítása” után az app 2 másodpercenként átnézi a mappát, és ha új vagy megváltozott kép kerül bele, rejtett ablakban lefuttatja rá a konvertert `--auto` módban. A már konvertált képeket a konverter kihagyja, mert a célfájljuk létezik, így mindig csak az új képek dolgozódnak fel; az első kör a figyelés előtt bekerült, még nem konvertált képeket is elvégzi.
+
+- Konverzió csak akkor indul, ha két egymást követő átnézésnél is változatlan a mappa, tehát a képek másolása befejeződött.
+- Az almappákat (köztük a kimenetet) nem figyeli.
+- Az utolsó futás eredménye az ablakban látszik, a teljes kimenete a `figyelo.log`-ban. Egy hibás képet a következő mappaváltozáskor újra megpróbál.
+- Az utoljára figyelt mappát a `watch_folder.txt` őrzi meg; a figyelés indításkor nem indul el magától.
+
 
 # CLI képernyőmentés
 

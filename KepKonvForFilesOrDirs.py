@@ -13,10 +13,15 @@ DEFAULT_WORKERS = 6
 # Képenkénti ImageMagick pixelgyorsítótár-limit gigabájtban. Ez felső korlát,
 # nem lefoglalás: az ImageMagick csak annyit használ, amennyi a képhez kell.
 DEFAULT_MEMORY_LIMIT_GB = 15
+# Kérdések nélküli futás az alapértékekkel (a GUI mappafigyelője használja).
+AUTO_ARG = '--auto'
+auto_mode = False
 
 
 
 def get_input(prompt, default=None):
+    if auto_mode:
+        return default or ''
     value = input(prompt)
     if not value and default is not None:
         value = default
@@ -301,19 +306,22 @@ def process_directory(directory, global_prefix, global_suffix, szelesseg, magass
                      memory_limit_gb, max_workers)
 
 def main():
+    global auto_mode
+    auto_mode = AUTO_ARG in sys.argv[1:]
+    paths = [arg for arg in sys.argv[1:] if arg != AUTO_ARG]
 
-    if len(sys.argv) <= 1:
+    if not paths:
         # Kérdezzen meg egy mappát, ha nincs megadva parancssori argumentum
         directory = get_input("Adja meg a feldolgozandó mappát: ")
         if not directory or not os.path.isdir(directory):
             print("Érvénytelen mappa.")
             return
-        sys.argv.append(directory)
+        paths.append(directory)
 
 
     # Echo arguments
     print("ARGS start")
-    print(" ".join(sys.argv[1:]))
+    print(" ".join(paths))
     print("ARGS stop")
 
     # Set output base directory
@@ -398,7 +406,7 @@ def main():
     print(f"Kiválasztott memórialimit: {memory_limit_gb:g} GB képenként, "
           f"legfeljebb {DEFAULT_WORKERS} párhuzamos képpel.")
 
-    jobs, skipped = plan_conversions(sys.argv[1:], global_prefix, global_suffix,
+    jobs, skipped = plan_conversions(paths, global_prefix, global_suffix,
                                     formatum, output_base_dir)
     with PhotoDatePreserver(enabled=preserve_dates) as date_preserver:
         run_batch(jobs, szelesseg, magassag, minoseg, mod, background_color,
@@ -407,7 +415,8 @@ def main():
 
     # Pause before exit
     print("\nFeldolgozás vége: ", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    input("Nyomjon meg egy gombot a kilépéshez...")
+    if not auto_mode:
+        input("Nyomjon meg egy gombot a kilépéshez...")
 
 if __name__ == "__main__":
     main()

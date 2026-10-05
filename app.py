@@ -1,14 +1,21 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from tkinterdnd2 import TkinterDnD, DND_FILES
 import subprocess
+import threading
 import os
+import re
 import sys
+from datetime import datetime
 
 
 RAW_COPY_SCRIPT = r"I:\AdatokrolAthelyezveIde\Képzés\1. Szakmai\Informatika\Win10\JPGAlapjanRAWCopy\JPGAlapjanRAWCopy.py"
 KEPKONV_OUTPUT_DIR = "opt-webp-or-jpg"  # A KepKonvForFilesOrDirs.py alapértelmezett kimeneti almappája
 SELECTION_DIR = "valogatas"
+WATCH_EXTENSIONS = ('.jpg', '.jpeg', '.png')  # A KepKonvForFilesOrDirs.py SUPPORTED_INPUTS-a
+WATCH_INTERVAL_MS = 2000  # Ennyi időnként nézzük át a figyelt mappát
+WATCH_FOLDER_FILE = "watch_folder.txt"  # Az utoljára figyelt mappa, az app mappájában
+WATCH_LOG_FILE = "figyelo.log"  # A figyelő által indított konverziók teljes kimenete
 
 
 def get_app_dir():
@@ -59,9 +66,37 @@ class App(TkinterDnD.Tk):
         self.label = tk.Label(self, text="Drag and Drop files here", bg="lightgray", anchor="nw", justify="left")
         self.label.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
+        # Mappafigyelő: a mappába kerülő új képeket az alapbeállításokkal konvertálja
+        self.watch_frame = tk.Frame(self)
+        self.watch_frame.grid(row=1, column=0, sticky="ew", padx=10)
+        self.watch_frame.grid_columnconfigure(1, weight=1)
+
+        tk.Label(self.watch_frame, text="Figyelt mappa:").grid(row=0, column=0, sticky="w")
+        self.watch_dir_var = tk.StringVar(value=self.load_watch_folder())
+        self.watch_entry = tk.Entry(self.watch_frame, textvariable=self.watch_dir_var)
+        self.watch_entry.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        self.watch_entry.drop_target_register(DND_FILES)
+        self.watch_entry.dnd_bind('<<Drop>>', self.drop_watch_folder)
+
+        self.watch_browse_button = tk.Button(self.watch_frame, text="Tallózás...", command=self.browse_watch_folder)
+        self.watch_browse_button.grid(row=0, column=2, sticky="ew", padx=(10, 0))
+
+        self.watch_button = tk.Button(self.watch_frame, text="Figyelés indítása", width=18, command=self.toggle_watch)
+        self.watch_button.grid(row=0, column=3, sticky="ew", padx=(10, 0))
+
+        self.watch_status = tk.Label(self.watch_frame, text="Figyelés: kikapcsolva", anchor="w")
+        self.watch_status.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(5, 0))
+
+        self.watch_dir = None  # A figyelés közben használt mappa (nem a szerkeszthető mező)
+        self.watch_job = None  # A következő after() hívás azonosítója
+        self.watch_last_snapshot = None  # Az előző átnézés képei: {név: (méret, módosítás)}
+        self.watch_done_snapshot = {}  # A legutóbbi konverzióba már bekerült állapot
+        self.watch_worker = None  # A futó konverzió szála
+        self.watch_result = None  # A szál ide teszi az eredményt, az átnézés olvassa ki
+
         # Gombsor: Start + script mappa megnyitása
         self.button_frame = tk.Frame(self)
-        self.button_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=10)
+        self.button_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
         self.button_frame.grid_columnconfigure(0, weight=1)
 
         self.start_button = tk.Button(self.button_frame, text="Start", command=self.run_script_in_cmd)
@@ -239,9 +274,173 @@ class App(TkinterDnD.Tk):
         except Exception as e:
             messagebox.showerror("Hiba", f"Nem sikerült elindítani a RAW másolót:\n{e}")
 
+    def drop_watch_folder(self, event):
+        if self.watch_dir:
+            messagebox.showinfo("Figyelés fut", "A mappa cseréjéhez előbb állítsd le a figyelést.")
+            return
+        paths = self.tk.splitlist(event.data)
+        if len(paths) == 1 and os.path.isdir(paths[0]):
+            self.watch_dir_var.set(os.path.normpath(paths[0]))
+        else:
+            messagebox.showwarning("Nincs mappa", "Egyetlen mappát húzz ide.")
+
+    def browse_watch_folder(self):
+        folder = filedialog.askdirectory(
+            initialdir=self.watch_dir_var.get() or None,
+            title="Figyelt mappa kiválasztása",
+        )
+        if folder:
+            self.watch_dir_var.set(os.path.normpath(folder))
+
+    def toggle_watch(self):
+        if self.watch_dir:
+            self.stop_watch()
+        else:
+            self.start_watch()
+
+    def start_watch(self):
+        """A mappa figyelésének indítása. Az első átnézés a még nem konvertált képeket is feldolgozza."""
+        folder = self.watch_dir_var.get().strip()
+        if not os.path.isdir(folder):
+            messagebox.showwarning("Nincs mappa", f"A mappa nem található:\n{folder}")
+            return
+        if not os.path.isfile(self.script_path):
+            messagebox.showerror("Hiba", f"A konverter script nem található:\n{self.script_path}")
+            return
+        self.watch_dir = os.path.normpath(folder)
+        self.watch_last_snapshot = None
+        self.watch_done_snapshot = {}
+        self.save_watch_folder()
+        self.watch_entry.config(state="disabled")
+        self.watch_browse_button.config(state="disabled")
+        self.watch_button.config(text="Figyelés leállítása")
+        self.set_watch_status("várakozás új képekre")
+        # Leállítás után még futhat az előző kör a konverzió végéig; nem indítunk mellé másikat
+        if self.watch_job:
+            self.after_cancel(self.watch_job)
+        self.poll_watch_folder()
+
+    def stop_watch(self):
+        """Új konverziót nem indít; egy már futó konverzió befejeződik, az eredménye megjelenik."""
+        self.watch_dir = None
+        self.watch_entry.config(state="normal")
+        self.watch_browse_button.config(state="normal")
+        self.watch_button.config(text="Figyelés indítása")
+        busy = self.watch_worker is not None and self.watch_worker.is_alive()
+        self.set_watch_status("a futó konverzió még befejeződik" if busy else "")
+
+    def set_watch_status(self, text):
+        state = "Figyelés bekapcsolva" if self.watch_dir else "Figyelés kikapcsolva"
+        self.watch_status.config(text=f"{state} – {text}" if text else state)
+
+    @staticmethod
+    def scan_watch_folder(folder):
+        """A mappa közvetlen képei: {név: (méret, módosítás)}. Az almappákat (pl. a kimenetet) nem nézi."""
+        snapshot = {}
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if not entry.name.lower().endswith(WATCH_EXTENSIONS):
+                    continue
+                try:
+                    # Nem az entry.stat(): Windowson a könyvtárbejegyzés mérete íráskor késve frissül
+                    stat = os.stat(entry.path)
+                except OSError:
+                    continue  # Közben törölték
+                if os.path.isfile(entry.path):
+                    snapshot[entry.name] = (stat.st_size, stat.st_mtime_ns)
+        return snapshot
+
+    def poll_watch_folder(self):
+        """Időnkénti átnézés. Konverziót csak akkor indít, ha van új vagy megváltozott kép,
+        és két egymást követő átnézésnél is változatlan (tehát a másolása befejeződött)."""
+        self.watch_job = None
+        self.collect_watch_result()
+        busy = self.watch_worker is not None and self.watch_worker.is_alive()
+        if not self.watch_dir:
+            if busy:  # Leállítás után csak a futó konverzió eredményét várjuk meg
+                self.watch_job = self.after(WATCH_INTERVAL_MS, self.poll_watch_folder)
+            return
+        try:
+            snapshot = self.scan_watch_folder(self.watch_dir)
+        except OSError as e:
+            self.set_watch_status(f"a mappa nem olvasható: {e}")
+        else:
+            stable = snapshot == self.watch_last_snapshot
+            self.watch_last_snapshot = snapshot
+            changed = any(self.watch_done_snapshot.get(name) != info for name, info in snapshot.items())
+            if stable and changed and not busy:
+                self.start_watch_conversion(snapshot)
+        self.watch_job = self.after(WATCH_INTERVAL_MS, self.poll_watch_folder)
+
+    def start_watch_conversion(self, snapshot):
+        # A már konvertált képeket a konverter kihagyja (létező célfájl), így csak az újak dolgozódnak fel.
+        # Hibás képet újra akkor próbál, ha a mappában megint változás történik.
+        self.watch_done_snapshot = snapshot
+        self.watch_result = None
+        self.set_watch_status("konvertálás folyamatban...")
+        self.watch_worker = threading.Thread(
+            target=self.run_watch_conversion, args=(self.watch_dir,), daemon=True
+        )
+        self.watch_worker.start()
+
+    def run_watch_conversion(self, folder):
+        """Háttérszálon fut: a konverter kérdések nélkül, az alapértékekkel, rejtett ablakban.
+        Tkinter-hívás itt nincs, az eredményt a poll_watch_folder olvassa ki."""
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        try:
+            result = subprocess.run(
+                ["python", self.script_path, "--auto", folder],
+                cwd=self.script_dir,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            output = result.stdout + result.stderr
+        except Exception as e:
+            output = f"Nem sikerült elindítani a konvertert: {e}"
+        try:
+            # Mindig csak a legutóbbi futás kimenete marad meg
+            with open(os.path.join(get_app_dir(), WATCH_LOG_FILE), "w", encoding="utf-8") as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {folder}\n\n{output}")
+        except OSError:
+            pass
+        self.watch_result = output
+
+    def collect_watch_result(self):
+        output, self.watch_result = self.watch_result, None
+        if output is None:
+            return
+        summary = re.search(r"Konverzió: (\d+) sikeres, (\d+) hibás", output)
+        if summary:
+            converted, failed = summary.groups()
+            text = f"{converted} új kép konvertálva"
+            if failed != "0":
+                text += f", {failed} hibás (részletek: {WATCH_LOG_FILE})"
+        else:
+            text = f"a konverzió nem futott le (részletek: {WATCH_LOG_FILE})"
+        self.set_watch_status(f"utolsó futás {datetime.now():%H:%M:%S}: {text}")
+
+    def load_watch_folder(self):
+        try:
+            with open(os.path.join(get_app_dir(), WATCH_FOLDER_FILE), encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def save_watch_folder(self):
+        try:
+            with open(os.path.join(get_app_dir(), WATCH_FOLDER_FILE), "w", encoding="utf-8") as f:
+                f.write(self.watch_dir_var.get().strip())
+        except OSError:
+            pass
+
     def on_closing(self):
         # Ablak méretének és pozíciójának elmentése
         self.save_window_settings()
+        self.save_watch_folder()
         self.destroy()
 
     def load_window_settings(self):
