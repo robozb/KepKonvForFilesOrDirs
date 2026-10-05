@@ -78,14 +78,23 @@ class App(TkinterDnD.Tk):
         self.watch_entry.drop_target_register(DND_FILES)
         self.watch_entry.dnd_bind('<<Drop>>', self.drop_watch_folder)
 
+        # A mezőben lévő mappa megnyitása Intézőben (figyelés közben is használható)
+        self.watch_open_button = tk.Button(
+            self.watch_frame,
+            text="📂",
+            font=("Segoe UI Emoji", 10),
+            command=self.open_watch_folder,
+        )
+        self.watch_open_button.grid(row=0, column=2, sticky="ns", padx=(5, 0))
+
         self.watch_browse_button = tk.Button(self.watch_frame, text="Tallózás...", command=self.browse_watch_folder)
-        self.watch_browse_button.grid(row=0, column=2, sticky="ew", padx=(10, 0))
+        self.watch_browse_button.grid(row=0, column=3, sticky="ew", padx=(10, 0))
 
         self.watch_button = tk.Button(self.watch_frame, text="Figyelés indítása", width=18, command=self.toggle_watch)
-        self.watch_button.grid(row=0, column=3, sticky="ew", padx=(10, 0))
+        self.watch_button.grid(row=0, column=4, sticky="ew", padx=(10, 0))
 
         self.watch_status = tk.Label(self.watch_frame, text="Figyelés: kikapcsolva", anchor="w")
-        self.watch_status.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(5, 0))
+        self.watch_status.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(5, 0))
 
         self.watch_dir = None  # A figyelés közben használt mappa (nem a szerkeszthető mező)
         self.watch_job = None  # A következő after() hívás azonosítója
@@ -283,6 +292,16 @@ class App(TkinterDnD.Tk):
             self.watch_dir_var.set(os.path.normpath(paths[0]))
         else:
             messagebox.showwarning("Nincs mappa", "Egyetlen mappát húzz ide.")
+
+    def open_watch_folder(self):
+        folder = self.watch_dir_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning("Nincs mappa", f"A mappa nem található:\n{folder}")
+            return
+        try:
+            os.startfile(os.path.normpath(folder))
+        except OSError as e:
+            messagebox.showerror("Hiba", f"Nem sikerült megnyitni a mappát:\n{e}")
 
     def browse_watch_folder(self):
         folder = filedialog.askdirectory(
