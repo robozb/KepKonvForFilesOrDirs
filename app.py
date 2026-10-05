@@ -6,11 +6,41 @@ import os
 import sys
 
 
+RAW_COPY_SCRIPT = r"I:\AdatokrolAthelyezveIde\Képzés\1. Szakmai\Informatika\Win10\JPGAlapjanRAWCopy\JPGAlapjanRAWCopy.py"
+KEPKONV_OUTPUT_DIR = "opt-webp-or-jpg"  # A KepKonvForFilesOrDirs.py alapértelmezett kimeneti almappája
+SELECTION_DIR = "valogatas"
+
+
 def get_app_dir():
     """Az alkalmazas sajat mappaja - .py-kent es .exe-kent (PyInstaller) is helyes."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def find_faststone_exe():
+    """FSViewer.exe helye: először a registry App Paths, utána a szokásos telepítési mappák."""
+    try:
+        import winreg
+        key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\FSViewer.exe"
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(root, key_path) as key:
+                    path = winreg.QueryValue(key, None)
+                    if path and os.path.isfile(path):
+                        return path
+            except OSError:
+                pass
+    except ImportError:
+        pass
+
+    for env in ("ProgramFiles(x86)", "ProgramFiles"):
+        base = os.environ.get(env)
+        if base:
+            path = os.path.join(base, "FastStone Image Viewer", "FSViewer.exe")
+            if os.path.isfile(path):
+                return path
+    return None
 
 class App(TkinterDnD.Tk):
     def __init__(self, script_path):
@@ -44,6 +74,31 @@ class App(TkinterDnD.Tk):
         )
         self.folder_button.grid(row=0, column=1, sticky="ew", padx=(10, 0))
 
+        # Csak akkor aktív, ha pontosan egy elem lett behúzva, és az egy mappa
+        self.faststone_button = tk.Button(
+            self.button_frame,
+            text="FastStone",
+            command=self.open_in_faststone,
+            state="disabled",
+        )
+        self.faststone_button.grid(row=0, column=2, sticky="ew", padx=(10, 0))
+
+        # Bejelölve a FastStone indítása előtt létrehozza a "valogatas" almappát
+        self.create_selection_var = tk.BooleanVar(value=False)
+        self.create_selection_check = tk.Checkbutton(
+            self.button_frame,
+            text="Válogatás mappa létrehozása",
+            variable=self.create_selection_var,
+        )
+        self.create_selection_check.grid(row=0, column=3, sticky="w", padx=(10, 0))
+
+        self.raw_copy_button = tk.Button(
+            self.button_frame,
+            text="RAW másoló",
+            command=self.open_raw_copy,
+        )
+        self.raw_copy_button.grid(row=0, column=4, sticky="ew", padx=(10, 0))
+
         # Ablak rácsbeállítás a dinamikus méretezéshez
         self.grid_rowconfigure(0, weight=1)  # A címke sorának növelése a rendelkezésre álló hely arányában
         self.grid_columnconfigure(0, weight=1)  # Az oszlop arányos növelése
@@ -66,6 +121,38 @@ class App(TkinterDnD.Tk):
 
         # Update the label to show only the current dropped files
         self.label.config(text=f"Files:\n" + "\n".join(self.file_list))
+
+        self.faststone_button.config(state="normal" if self.get_single_dir() else "disabled")
+
+    def get_single_dir(self):
+        """Visszaadja a mappát, ha pontosan egy elem van a listában és az mappa, különben None."""
+        if len(self.file_list) == 1 and os.path.isdir(self.file_list[0]):
+            return self.file_list[0]
+        return None
+
+    def get_base_dir(self):
+        """Az eredeti (forrás) mappa: egy mappa esetén maga a mappa, fájloknál a közös szülőmappájuk.
+
+        None, ha nincs behúzott elem, vagy a fájlok különböző mappákban vannak
+        (ilyenkor a KepKonv is több kimeneti mappába ír).
+        """
+        single_dir = self.get_single_dir()
+        if single_dir:
+            return os.path.normpath(single_dir)
+        parents = {os.path.normcase(os.path.dirname(os.path.abspath(f))) for f in self.file_list}
+        if len(parents) != 1:
+            return None
+        return os.path.dirname(os.path.abspath(self.file_list[0]))
+
+    def get_output_dir(self):
+        """A KepKonv alapértelmezett kimeneti mappája (<forrás mappa>\\opt-webp-or-jpg)."""
+        base_dir = self.get_base_dir()
+        return os.path.join(base_dir, KEPKONV_OUTPUT_DIR) if base_dir else None
+
+    def get_selection_dir(self):
+        """A valogatas mappa a KepKonv kimenetén belül."""
+        output_dir = self.get_output_dir()
+        return os.path.join(output_dir, SELECTION_DIR) if output_dir else None
 
     def run_script_in_cmd(self):
         if not self.file_list:
@@ -96,6 +183,61 @@ class App(TkinterDnD.Tk):
                 os.startfile(self.script_dir)
         except Exception as e:
             messagebox.showerror("Hiba", f"Nem sikerült megnyitni a mappát:\n{e}")
+
+    def open_in_faststone(self):
+        """A KepKonv kimeneti mappájának megnyitása FastStone Image Viewerben.
+
+        Bejelölt jelölőnégyzetnél előtte létrehozza benne a valogatas mappát.
+        """
+        if not self.get_single_dir():
+            messagebox.showwarning("Nincs mappa", "Pontosan egy mappát húzz be.")
+            return
+        output_dir = self.get_output_dir()
+        if not os.path.isdir(output_dir):
+            messagebox.showwarning(
+                "Nincs kimenet",
+                f"A KepKonv kimeneti mappája még nem létezik:\n{output_dir}\n\nElőbb futtasd a konvertálást (Start).",
+            )
+            return
+        exe = find_faststone_exe()
+        if not exe:
+            messagebox.showerror("Hiba", "A FastStone Image Viewer (FSViewer.exe) nem található.")
+            return
+        if self.create_selection_var.get():
+            try:
+                os.makedirs(self.get_selection_dir(), exist_ok=True)
+            except OSError as e:
+                messagebox.showerror("Hiba", f"Nem sikerült létrehozni a valogatas mappát:\n{e}")
+                return
+        try:
+            subprocess.Popen([exe, output_dir])
+        except Exception as e:
+            messagebox.showerror("Hiba", f"Nem sikerült elindítani a FastStone-t:\n{e}")
+
+    def open_raw_copy(self):
+        """A JPGAlapjanRAWCopy GUI indítása (a saját mappájából, hogy a config.ini-t megtalálja).
+
+        A kép könyvtár a KepKonv kimenetében lévő valogatas mappa (ha létezik),
+        a RAW könyvtár pedig az eredeti, behúzott forrás mappa.
+        """
+        if not os.path.isfile(RAW_COPY_SCRIPT):
+            messagebox.showerror("Hiba", f"A script nem található:\n{RAW_COPY_SCRIPT}")
+            return
+        args = ["python", RAW_COPY_SCRIPT]
+        base_dir = self.get_base_dir()
+        if base_dir:
+            selection_dir = self.get_selection_dir()
+            if os.path.isdir(selection_dir):
+                args += ["--jpg-dir", selection_dir]
+            args += ["--raw-dir", base_dir]
+        try:
+            subprocess.Popen(
+                args,
+                cwd=os.path.dirname(RAW_COPY_SCRIPT),
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception as e:
+            messagebox.showerror("Hiba", f"Nem sikerült elindítani a RAW másolót:\n{e}")
 
     def on_closing(self):
         # Ablak méretének és pozíciójának elmentése
